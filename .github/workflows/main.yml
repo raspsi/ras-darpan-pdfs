@@ -1,0 +1,44 @@
+name: RAS Darpan Notification
+
+on:
+  workflow_dispatch:
+    inputs:
+      title:
+        description: "Notification Title"
+        required: true
+        default: "RAS Darpan"
+      message:
+        description: "Notification Message"
+        required: true
+        default: "New update available"
+
+jobs:
+  send-notification:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Authenticate Firebase
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: '${{ secrets.FIREBASE_SERVICE_ACCOUNT }}'
+
+      - name: Send Firebase Notification
+        env:
+          TITLE: ${{ inputs.title }}
+          MESSAGE: ${{ inputs.message }}
+        run: |
+          ACCESS_TOKEN=$(gcloud auth print-access-token)
+
+          curl -X POST \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            -H "Content-Type: application/json; UTF-8" \
+            "https://fcm.googleapis.com/v1/projects/raspsi/messages:send" \
+            -d '{
+              "message": {
+                "topic": "all",
+                "notification": {
+                  "title": "'"$TITLE"'",
+                  "body": "'"$MESSAGE"'"
+                }
+              }
+            }'
