@@ -1,0 +1,236 @@
+name: RAS Darpan Notification
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - ".github/**"
+
+  workflow_dispatch:
+    inputs:
+      title:
+        description: "Notification Title"
+        required: true
+        default: "RAS दर्पण"
+      message:
+        description: "Notification Message"
+        required: true
+        default: "RAS दर्पण में नया content उपलब्ध है।"
+
+permissions:
+  contents: read
+
+jobs:
+  send-notification:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Firebase Admin
+        run: npm install --no-save firebase-admin
+
+      - name: Send Firebase Notification
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          EVENT_NAME: ${{ github.event_name }}
+          MANUAL_TITLE: ${{ inputs.title }}
+          MANUAL_MESSAGE: ${{ inputs.message }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        run: |
+          node <<'NODE'
+          const admin = require("firebase-admin");
+          const { execSync } = require("child_process");
+
+          const serviceAccount =
+            JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+
+          admin.initializeApp({
+            credential: admin.credential.cert(serviceAccount)
+          });
+
+          const db = admin.firestore();
+          const messaging = admin.messaging();
+
+          async function main() {
+
+            let title = "";
+            let message = "";
+            let files = [];
+
+            // ==========================================
+            // MANUAL NOTIFICATION
+            // ==========================================
+
+            if (process.env.EVENT_NAME === "workflow_dispatch") {
+
+              title =
+                process.env.MANUAL_TITLE ||
+                "RAS दर्पण";
+
+              message =
+                process.env.MANUAL_MESSAGE ||
+                "RAS दर्पण में नया content उपलब्ध है।";
+
+            }
+
+            // ==========================================
+            // GITHUB FILE UPLOAD / UPDATE
+            // ==========================================
+
+            else {
+
+              title =
+                "🔔 RAS दर्पण में नया अपडेट";
+
+              try {
+
+                const before = process.env.BEFORE_SHA;
+                const after = process.env.AFTER_SHA;
+
+                if (
+                  before &&
+                  after &&
+                  !/^0+$/.test(before)
+                ) {
+
+                  const output =
+                    execSync(
+                      `git diff --name-only ${before} ${after}`,
+                      { encoding: "utf8" }
+                    );
+
+                  files =
+                    output
+                      .split(/\r?\n/)
+                      .map(x => x.trim())
+                      .filter(Boolean);
+                }
+
+              } catch (error) {
+
+                console.log(
+                  "File list नहीं मिल सकी:",
+                  error.message
+                );
+
+              }
+
+              if (files.length > 0) {
+
+                const shownFiles =
+                  files.slice(0, 8);
+
+                message =
+                  "नया content उपलब्ध है:\n" +
+                  shownFiles.join("\n");
+
+                if (files.length > 8) {
+                  message +=
+                    `\nऔर ${files.length - 8} file...`;
+                }
+
+              } else {
+
+                message =
+                  "RAS दर्पण में नया content उपलब्ध है।";
+              }
+            }
+
+            // ==========================================
+            // FIRESTORE
+            // ==========================================
+
+            const notificationData = {
+
+              title: title,
+
+              message: message,
+
+              time:
+                new Intl.DateTimeFormat(
+                  "en-IN",
+                  {
+                    dateStyle: "medium",
+                    timeStyle: "short",
+                    timeZone: "Asia/Kolkata"
+                  }
+                ).format(new Date()),
+
+              timestamp:
+                admin.firestore.Timestamp.now(),
+
+              type:
+                process.env.EVENT_NAME ===
+                "workflow_dispatch"
+                  ? "manual"
+                  : "github",
+
+              source: "github",
+
+              files: files
+            };
+
+            const docRef =
+              await db
+                .collection("notifications")
+                .add(notificationData);
+
+            console.log(
+              "Firestore notification saved:",
+              docRef.id
+            );
+
+            // ==========================================
+            // FCM PHONE NOTIFICATION
+            // ==========================================
+
+            const response =
+              await messaging.send({
+
+                topic: "rasdarpan",
+
+                notification: {
+                  title: title,
+                  body: message
+                },
+
+                data: {
+                  type: "github_update",
+                  source: "github",
+                  notificationId: docRef.id
+                },
+
+                android: {
+                  notification: {
+                    channelId:
+                      "ras_darpan_updates"
+                  }
+                }
+              });
+
+            console.log(
+              "FCM notification sent:",
+              response
+            );
+          }
+
+          main().catch(error => {
+
+            console.error(error);
+
+            process.exit(1);
+
+          });
+          NODE
